@@ -68,7 +68,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchOnce(url, { timeoutMs, strict }) {
+async function fetchOnce(url, { timeoutMs, mode }) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
 
@@ -85,8 +85,12 @@ async function fetchOnce(url, { timeoutMs, strict }) {
       },
     });
 
-    const ok = strict ? res.status >= 200 && res.status < 400 : Number.isFinite(res.status) && res.status > 0;
-    return { ok, status: res.status, finalUrl: res.url || url };
+    const status = res.status;
+    let ok = false;
+    if (mode === 2) ok = status === 200;
+    else if (mode === 1) ok = status >= 200 && status < 400;
+    else ok = Number.isFinite(status) && status > 0;
+    return { ok, status, finalUrl: res.url || url };
   } catch (e) {
     return { ok: false, status: 0, finalUrl: '', error: String(e && e.message ? e.message : e) };
   } finally {
@@ -103,7 +107,7 @@ async function probeTarget(candidates, opts) {
   return { ok: false };
 }
 
-async function checkTarget(candidates, { probes, retries, timeoutMs, strict }) {
+async function checkTarget(candidates, { probes, retries, timeoutMs, mode }) {
   let success = 0;
   const errors = [];
 
@@ -112,7 +116,7 @@ async function checkTarget(candidates, { probes, retries, timeoutMs, strict }) {
     let lastErr = '';
 
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const r = await probeTarget(candidates, { timeoutMs, strict });
+      const r = await probeTarget(candidates, { timeoutMs, mode });
       if (r.ok) {
         ok = true;
         break;
@@ -163,7 +167,9 @@ module.exports = async function handler(req, res) {
     const timeoutMs = clampInt(body?.timeoutMs, 1000, 60000, 8000);
     const threshold = clampInt(body?.threshold, 0, 100, 85);
     const retries = clampInt(body?.retries, 0, 5, 1);
-    const strict = clampInt(body?.strict, 0, 1, 0) === 1;
+    // mode: 0=any http response, 1=2xx/3xx, 2=only 200
+    const modeRaw = body?.mode != null ? body.mode : body?.strict;
+    const mode = clampInt(modeRaw, 0, 2, 1);
 
     const usesCrlf = text.includes('\r\n');
     const lines = text.split(/\r?\n/);
@@ -204,7 +210,7 @@ module.exports = async function handler(req, res) {
     const items = uniqueKeys.map((k) => keyToItem.get(k)).filter(Boolean);
 
     const checked = await runPool(items, concurrency, async (it) => {
-      const r = await checkTarget(it.candidates, { probes, retries, timeoutMs, strict });
+      const r = await checkTarget(it.candidates, { probes, retries, timeoutMs, mode });
       return { key: it.key, rate: r.rate, errors: r.errors, fails: r.fails, probes };
     });
 
@@ -243,7 +249,7 @@ module.exports = async function handler(req, res) {
       timeoutMs,
       threshold,
       retries,
-      strict: strict ? 1 : 0,
+      mode,
     };
 
     res.statusCode = 200;
@@ -256,4 +262,3 @@ module.exports = async function handler(req, res) {
     res.end(JSON.stringify({ error: String(e && e.message ? e.message : e) }));
   }
 };
-
