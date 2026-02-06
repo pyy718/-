@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "name": "domain-connectivity-checker",
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 60
+    }
+  }
+}
