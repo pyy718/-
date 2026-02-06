@@ -315,6 +315,8 @@
       const elBadge = document.getElementById("badge");
 
       let lastBlobUrl = null;
+      const LOCAL_ENGINE_BASE = "http://127.0.0.1:17888";
+      let localEngineAvailable = false;
 
       function setBusy(busy) {
         elRun.disabled = busy;
@@ -342,6 +344,56 @@
         return Number.isFinite(v) ? v : def;
       }
 
+      async function pingLocalEngine() {
+        try {
+          const r = await fetch(`${LOCAL_ENGINE_BASE}/health`, { method: "GET" });
+          const j = await r.json().catch(() => null);
+          localEngineAvailable = !!(r.ok && j && j.ok);
+          return localEngineAvailable;
+        } catch {
+          localEngineAvailable = false;
+          return false;
+        }
+      }
+
+      // Add UI for local engine toggle (no build tooling, keep it simple).
+      (function mountLocalToggle() {
+        const right = document.querySelector(".grid > div:last-child");
+        if (!right) return;
+
+        const box = document.createElement("div");
+        box.style.marginTop = "10px";
+        box.innerHTML = `
+          <div class="pill" style="justify-content:space-between; width:100%">
+            <span>本地引擎（推荐：完全按本地版口径）</span>
+            <label style="display:flex; gap:8px; align-items:center; margin:0; color: var(--text);">
+              <input id="useLocal" type="checkbox" style="transform: translateY(1px);" />
+              <span id="localState" style="color: var(--muted);">未检测</span>
+            </label>
+          </div>
+          <div class="hint">使用前：先在你电脑双击运行本地引擎（它会在 <span class="k">127.0.0.1:17888</span> 启动服务）。</div>
+        `;
+        right.appendChild(box);
+
+        const elUseLocal = document.getElementById("useLocal");
+        const elLocalState = document.getElementById("localState");
+
+        async function refresh() {
+          elLocalState.textContent = "检测中…";
+          const ok = await pingLocalEngine();
+          elLocalState.textContent = ok ? "已连接" : "未连接";
+          elLocalState.style.color = ok ? "var(--good)" : "var(--bad)";
+          if (!ok) elUseLocal.checked = false;
+        }
+
+        elUseLocal.addEventListener("change", async () => {
+          if (elUseLocal.checked) await refresh();
+        });
+
+        // initial quick check (non-blocking)
+        setTimeout(() => refresh(), 500);
+      })();
+
       elRun.addEventListener("click", async () => {
         const f = elFile.files && elFile.files[0];
         if (!f) {
@@ -355,6 +407,7 @@
         const threshold = Math.max(0, Math.min(100, Math.floor(num("threshold", 85))));
         const retries = Math.max(0, Math.min(5, Math.floor(num("retries", 1))));
         const mode = Math.max(0, Math.min(2, Math.floor(num("mode", 1))));
+        const useLocal = !!document.getElementById("useLocal")?.checked;
 
         setBusy(true);
         elDownload.disabled = true;
@@ -365,11 +418,30 @@
 
         try {
           const text = await readTextFile(f);
-          const res = await fetch("/api/check", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text, probes, concurrency, timeoutMs, threshold, retries, mode }),
-          });
+          let res;
+          if (useLocal) {
+            const ok = await pingLocalEngine();
+            if (!ok) throw new Error("本地引擎未连接：请先双击启动本地引擎，再勾选使用。");
+            res = await fetch(`${LOCAL_ENGINE_BASE}/check`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                text,
+                concurrency,
+                threshold,
+                retries,
+                // local engine uses the itdog script; keep its default timeout larger
+                timeoutMs: 120000,
+                headless: true,
+              }),
+            });
+          } else {
+            res = await fetch("/api/check", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ text, probes, concurrency, timeoutMs, threshold, retries, mode }),
+            });
+          }
 
           const data = await res.json().catch(() => null);
           if (!res.ok || !data) {
@@ -377,15 +449,21 @@
             throw new Error(msg);
           }
 
+          const outputText = data.outputText || data.output || "";
+
           elOutName.textContent = data.fileName || "-";
-          elOutText.textContent = data.outputText || "";
-          elSummary.textContent =
-            `总行数 ${data.stats?.totalLines ?? "-"} / 目标 ${data.stats?.targets ?? "-"} / 失败 ${data.stats?.failedTargets ?? "-"} / 低于阈值 ${data.stats?.lowCount ?? "-"}`;
+          elOutText.textContent = outputText;
+          if (data.stats) {
+            elSummary.textContent =
+              `总行数 ${data.stats?.totalLines ?? "-"} / 目标 ${data.stats?.targets ?? "-"} / 失败 ${data.stats?.failedTargets ?? "-"} / 低于阈值 ${data.stats?.lowCount ?? "-"}`;
+          } else {
+            elSummary.textContent = useLocal ? "本地引擎完成（统计略）" : "-";
+          }
 
           elOut.style.display = "block";
-          showBadge(`完成：失败目标 ${data.stats?.failedTargets ?? 0} / ${data.stats?.targets ?? 0}`);
+          showBadge(useLocal ? "完成：本地引擎" : `完成：失败目标 ${data.stats?.failedTargets ?? 0} / ${data.stats?.targets ?? 0}`);
 
-          const blob = new Blob([data.outputText || ""], { type: "text/plain;charset=utf-8" });
+          const blob = new Blob([outputText], { type: "text/plain;charset=utf-8" });
           lastBlobUrl = URL.createObjectURL(blob);
           elDownload.disabled = false;
           elDownload.onclick = () => {
